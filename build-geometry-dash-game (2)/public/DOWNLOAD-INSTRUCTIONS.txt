@@ -1,0 +1,37 @@
+NEON DASH CLASSROOM - DOWNLOAD AND HOSTING
+==========================================
+
+MAIN FILE
+  neon-dash-classroom.html
+
+Open it directly in Chrome or Edge, or rename it to index.html before
+uploading it to a static website host.
+
+CORRECT SERVER ADDRESSES
+  /neon-dash-classroom.html
+  /classroom-relay.mjs
+
+Do not add /public/ to the browser address. The public directory is the
+source folder; its files are served from the website root.
+
+FREE PUBLIC HOSTING
+  1. Rename neon-dash-classroom.html to index.html.
+  2. Go to https://app.netlify.com/drop
+  3. Drop index.html onto the page.
+  4. Netlify gives you a public HTTPS link to share.
+
+LIVE TEACHER CONTROL
+  The public HTML link provides the game, level editor, lesson plan, names,
+  lives, timers and entry message. Live teacher control across separate
+  devices additionally requires classroom-relay.mjs or a hosted WebSocket
+  service.
+
+RECOMMENDED SCHOOL-COMPUTER MODE
+  Download neon-dash-classroom.html and classroom-server.mjs into the same
+  folder on the teacher computer. Install Node.js, run "npm install ws" once,
+  then run "node classroom-server.mjs". Give pupils the http:// address it
+  prints. They need only Chrome or Edge and do not download any files.
+
+PUBLIC HTTPS MODE
+  Deploy the repository using render.yaml on Render. This serves one HTTPS
+  link and secure WebSocket classroom controls from the same hostname.

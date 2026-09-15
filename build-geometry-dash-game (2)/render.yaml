@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: neon-dash-classroom
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node public/classroom-server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
