@@ -115,7 +115,7 @@ input[type=range]{width:150px;accent-color:#2ef2ff}
 </div>
 <div id="ui"></div>
 <div id="layer"></div>
-<div class="version">CLASSROOM BUILD 2026.03.27.0</div>
+<div class="version">CLASSROOM BUILD 2026.03.27.3</div>
 </div>
 <script>
 (function(){
@@ -135,7 +135,8 @@ var lab=[],labTool='s1',labScroll=0,painting=false,ed=null,ew=0,eh=0,edpr=1,labH
 var autoRelay=window.__CLASSROOM_SERVER__?((location.protocol==='https:'?'wss://':'ws://')+location.host):'';
 var role=null,seat=0,name='',net=null,students=new Map(),relay=new URLSearchParams(location.search).get('relay')||autoRelay||localStorage.getItem(K+'relay')||'',netStatus=autoRelay?'connecting':'local';
 var locked=false,lockText='Eyes on the teacher, please!',teacherMsg='',spot=null,consoleOpen=false,selSeat=0,conTab='class';
-var teacherAuthed=false,loginFails=0,loginLockUntil=0;
+var teacherAuthed=false,studentAuthed=false,loginFails=0,loginLockUntil=0,hostPending=null,studentPending=null,classJoinCode='';
+function serverMode(){return !!relay;}
 var race=null,racePct=0,raceDone=false,raceTime=0,raceWinner='',raceSel=0,raceDeaths=0;
 var GFX_PRESETS={
  basic:{name:'BASIC',round:0,glow:0,parts:.35,trail:0,grid:0,stars:0,grad:0,face:0,note:'Fastest. Flat colours, square edges, few effects. Best for older computers.'},
@@ -175,6 +176,8 @@ var savedTeacherHash=load('teacherHash','');
 var teacherHash=savedTeacherHash||passwordHash('NEON2026');
 var teacherPassCustom=!!savedTeacherHash;
 try{teacherAuthed=sessionStorage.getItem(K+'teacherAuth')==='1';}catch(e){}
+/* Server sessions must prove their code on each new connection. */
+if(serverMode())teacherAuthed=false;
 function classPack(){try{return btoa(unescape(encodeURIComponent(JSON.stringify({v:1,brief:brief,rules:rules,teacherHash:teacherHash})))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}catch(e){return '';}}
 function classLink(){return location.href.split('#')[0].split('?')[0]+'#class='+classPack();}
 function readClassPack(){try{var m=location.hash.match(/class=([^&]+)/);if(!m)return;var b=m[1].replace(/-/g,'+').replace(/_/g,'/');var data=JSON.parse(decodeURIComponent(escape(atob(b+'='.repeat((4-b.length%4)%4)))));if(data.brief!=null)brief=String(data.brief);if(data.rules)rules=data.rules;if(data.teacherHash){teacherHash=String(data.teacherHash);teacherPassCustom=true;}}catch(e){}}
@@ -186,27 +189,43 @@ function persist(){save('lives',lives);save('edits',edits);save('tested',tested)
  else{var s=+(q.get('seat')||w.__SEAT__||0);if(s>=1&&s<=30){role='student';seat=s;}
       else{var r=localStorage.getItem(K+'role');if(r==='teacher'||r==='student'){role=r;seat=+(localStorage.getItem(K+'seat')||0);}}}
  name=load('name','')||'';})();
-function setRole(r,s,nm){role=r;seat=s||0;if(nm)name=nm;localStorage.setItem(K+'role',r);if(s)localStorage.setItem(K+'seat',s);save('name',name);
- connect();renderEntryMessage();}
+function setRole(r,s,nm,keepNet){role=r;seat=s||0;if(nm)name=nm;localStorage.setItem(K+'role',r);if(s)localStorage.setItem(K+'seat',s);save('name',name);
+ if(!keepNet)connect();
+ if(r==='student'&&serverMode()&&!studentAuthed)renderStudentLogin();else renderEntryMessage();}
 function logout(){if(!confirm('Log out of this device? Your saved level stays on this computer.'))return;
  try{localStorage.removeItem(K+'role');localStorage.removeItem(K+'seat');sessionStorage.removeItem(K+'teacherAuth');}catch(e){}
- teacherAuthed=false;
+ teacherAuthed=false;studentAuthed=false;
  if(net){net.close();net=null;}role=null;seat=0;consoleOpen=false;locked=false;spot=null;teacherMsg='';
  if(location.search)location.href=location.href.split('?')[0];else{layer.innerHTML='';renderRole();}}
 
 /* ---------------- network ---------------- */
 function Net(url){var me=this;me.cb=function(){};me.bc=null;me.ws=null;
- try{me.bc=new BroadcastChannel('neon-dash-classroom');me.bc.onmessage=function(e){me.cb(e.data);};}catch(e){}
+ /* When a server is active, every command must pass through its code check.
+    BroadcastChannel is only a zero-server fallback for tabs on one device. */
+ if(!serverMode())try{me.bc=new BroadcastChannel('neon-dash-classroom');me.bc.onmessage=function(e){me.cb(e.data);};}catch(e){}
  if(url){netStatus='connecting';try{me.ws=new WebSocket(url);
   me.ws.onopen=function(){netStatus='online';refreshBadges();
-   setTimeout(function(){if(role==='student')push();else if(role==='teacher')me.send({t:'who',brief:brief,rules:rules,teacherHash:teacherHash});},0);};
+   setTimeout(function(){
+    if(role==='student'&&(!serverMode()||studentAuthed))push();
+    else if(role==='teacher'&&teacherAuthed)me.send({t:'who',brief:brief,rules:rules,teacherHash:teacherHash});
+   },0);};
   me.ws.onmessage=function(e){try{me.cb(JSON.parse(e.data));}catch(x){}};
   me.ws.onerror=function(){netStatus='error';refreshBadges();};
   me.ws.onclose=function(){netStatus='error';refreshBadges();};}catch(e){netStatus='error';}}}
 Net.prototype.send=function(m){try{if(this.bc)this.bc.postMessage(m);}catch(e){}try{if(this.ws&&this.ws.readyState===1)this.ws.send(JSON.stringify(m));}catch(e){}};
 Net.prototype.close=function(){try{if(this.bc)this.bc.close();}catch(e){}try{if(this.ws)this.ws.close();}catch(e){}};
-function connect(){if(!role)return;if(net)net.close();net=new Net(relay);net.cb=onNet;if(isTeacher())net.send({t:'who',brief:brief,rules:rules,teacherHash:teacherHash});else push();}
+function connect(){if(!role)return;if(net)net.close();net=new Net(relay);net.cb=onNet;
+ if(isTeacher()&&teacherAuthed)net.send({t:'who',brief:brief,rules:rules,teacherHash:teacherHash});
+ else if(role==='student'&&(!serverMode()||studentAuthed))push();}
 function onNet(m){if(!m)return;
+ /* level sharing by word code - works for everyone, any role */
+ if(m.t==='pub'&&m.code){pubs[m.code]=m.data;save('pubs',pubs);return;}
+ if(m.t==='get'&&m.code){if(pubs[m.code]&&net)net.send({t:'got',code:m.code,data:pubs[m.code]});return;}
+ if(m.t==='got'&&m.code){if(pendingGet&&pendingGet.code===m.code&&!pendingGet.done){
+  pendingGet.done=true;pubs[m.code]=m.data;save('pubs',pubs);
+  var f=pendingGet.cb;pendingGet=null;f(m.data);}return;}
+ if(m.t==='hostres'){if(m.classCode)classJoinCode=m.classCode;hostPending&&hostPending(m);return;}
+ if(m.t==='studentres'){studentPending&&studentPending(m);return;}
  if(isTeacher()&&m.t==='state'){var first=!students.has(m.s.seat);students.set(m.s.seat,m.s);
   if(first&&net){net.send({t:'cmd',target:m.s.seat,cmd:{c:'brief',text:brief,show:false}});net.send({t:'cmd',target:m.s.seat,cmd:{c:'rules',rules:rules}});net.send({t:'cmd',target:m.s.seat,cmd:{c:'teacherhash',hash:teacherHash}});net.send({t:'cmd',target:m.s.seat,cmd:{c:'gfx',name:gfxName}});
    if(race)net.send({t:'cmd',target:m.s.seat,cmd:{c:'race',id:race.id,kind:race.kind,idx:race.idx,code:race.code,title:race.title}});}
@@ -214,7 +233,7 @@ function onNet(m){if(!m)return;
   if(consoleOpen&&(conTab==='class'||conTab==='race'))renderConsole();return;}
  if(!isTeacher()&&m.t==='who'){if(m.brief){brief=m.brief;save('brief',brief);}if(m.rules){rules=m.rules;save('rules',rules);}if(m.teacherHash){teacherHash=m.teacherHash;teacherPassCustom=true;}push();return;}
  if(!isTeacher()&&m.t==='cmd'&&(m.target==='all'||m.target===seat))doCmd(m.cmd);}
-function push(){if(role==='student'&&net)net.send({t:'state',s:{seat:seat,name:name||('Player '+seat),screen:mode,levelName:LEVELS[levelIndex].name,
+function push(){if(role==='student'&&net&&(!serverMode()||studentAuthed))net.send({t:'state',s:{seat:seat,name:name||('Player '+seat),screen:mode,levelName:LEVELS[levelIndex].name,
  lives:lives,edits:edits,tested:tested,need:rules.edits,playLeft:Math.round(playLeft),designLock:designLock,locked:locked,
  attempts:attempt,pieces:lab.length,best:load('best'+levelIndex,0),code:lab.length?encode(lab):'',
  raceId:race?race.id:'',racePct:racePct,raceDone:raceDone,raceTime:raceTime,raceDeaths:raceDeaths,ts:Date.now()}});}
@@ -256,32 +275,85 @@ function noteEdit(){if(isTeacher())return;edits++;persist();if(designLock&&progr
 function noteTest(){if(isTeacher())return;tested++;persist();if(designLock&&progressOk())refill(false);}
 
 /* ---------------- role picker ---------------- */
+function renderStudentLogin(){
+ mode='student-login';paused=false;level=makeLevel(levelIndex);resetRun(true);$('#hud').classList.add('hidden');layer.innerHTML='';ui.style.display='';
+ ui.innerHTML='<div class="overlay"><div class="panel" style="max-width:450px">'+
+  '<h2 style="margin:0;text-align:center;color:var(--cyan)">JOIN YOUR CLASS</h2>'+
+  '<p class="sub small">Hi <b>'+esc(name||('Player '+seat))+'</b>! Ask your teacher for today\u2019s four-word STUDENT JOIN CODE.</p>'+
+  '<form id="studentCodeForm"><label class="label" for="studentCode">STUDENT JOIN CODE</label>'+
+  '<input id="studentCode" class="input" autocomplete="off" autocapitalize="characters" placeholder="e.g. BLOCK JUMP STAR GRID"/>'+
+  '<p id="studentCodeError" class="small" style="min-height:18px;color:var(--pink)"></p>'+
+  '<div class="row"><button class="btn primary grow" type="submit">JOIN CLASS</button>'+
+  '<button class="btn" type="button" id="studentCodeBack">BACK</button></div></form>'+
+  '<div class="warn" style="margin-top:12px">Use the STUDENT JOIN CODE, not the private Teacher Hosting Code.</div></div></div>';
+ var input=$('#studentCode');
+ $('#studentCodeBack').onclick=function(){role=null;studentAuthed=false;renderRole();};
+ $('#studentCodeForm').onsubmit=function(e){e.preventDefault();var code=normCode(input.value);
+  if(!code){$('#studentCodeError').textContent='Type the four words your teacher gave you.';return;}
+  $('#studentCodeError').textContent='Checking the code...';
+  var answered=false,started=Date.now();
+  studentPending=function(m){if(answered)return;answered=true;studentPending=null;
+   if(m.ok){studentAuthed=true;if(m.brief){brief=m.brief;save('brief',brief);}if(m.rules){rules=m.rules;save('rules',rules);}
+    renderEntryMessage();push();}
+   else{input.value='';$('#studentCodeError').textContent='That join code is not right. Ask your teacher and try again.';input.focus();}};
+  (function sendWhenReady(){
+   if(answered)return;
+   if(net&&net.ws&&net.ws.readyState===1){net.send({t:'studentauth',code:code,seat:seat,name:name});return;}
+   if(Date.now()-started>5000){answered=true;studentPending=null;$('#studentCodeError').textContent='Cannot reach the class server. Check the address with your teacher.';return;}
+   setTimeout(sendWhenReady,150);
+  })();};
+ setTimeout(function(){input.focus();},30);
+}
 function renderTeacherLogin(){
  mode='teacher-login';paused=false;level=makeLevel(levelIndex);resetRun(true);$('#hud').classList.add('hidden');layer.innerHTML='';ui.style.display='';
  var wait=Math.max(0,Math.ceil((loginLockUntil-Date.now())/1000));
- ui.innerHTML='<div class="overlay"><div class="panel" style="max-width:430px">'+
+ var hosted=serverMode();
+ ui.innerHTML='<div class="overlay"><div class="panel" style="max-width:450px">'+
   '<h2 style="margin:0;text-align:center;color:var(--gold)">TEACHER LOGIN</h2>'+
-  '<p class="sub small">Enter the teacher password to open unlimited play and classroom controls.</p>'+
-  '<form id="teacherLoginForm"><label class="label" for="teacherPassword">PASSWORD</label>'+
-  '<input id="teacherPassword" class="input" type="password" autocomplete="current-password" placeholder="Teacher password" '+(wait?'disabled':'')+'/>'+
-  '<label class="small" style="display:block;margin:9px 0"><input id="showTeacherPassword" type="checkbox"/> Show password</label>'+
+  (hosted
+   ?'<p class="sub small">Type the <b>HOSTING CODE</b> shown in the server window on the hosting computer.</p>'
+   :'<p class="sub small">Type the teacher password for this device.</p>')+
+  '<form id="teacherLoginForm">'+
+  '<label class="label" for="teacherPassword">'+(hosted?'HOSTING CODE':'PASSWORD')+'</label>'+
+  '<input id="teacherPassword" class="input" type="'+(hosted?'text':'password')+'" autocomplete="off" '+
+   'placeholder="'+(hosted?'e.g. SPIKE TOWER NEON PULSE':'Teacher password')+'" '+(wait?'disabled':'')+'/>'+
+  (hosted?'':'<label class="small" style="display:block;margin:9px 0"><input id="showTeacherPassword" type="checkbox"/> Show password</label>')+
   '<p id="teacherLoginError" class="small" style="min-height:18px;color:var(--pink)">'+(wait?'Too many attempts. Try again in '+wait+' seconds.':'')+'</p>'+
   '<div class="row"><button class="btn primary grow" type="submit" '+(wait?'disabled':'')+'>LOG IN AS TEACHER</button>'+
   '<button class="btn" type="button" id="teacherLoginBack">BACK</button></div></form>'+
-  '<p class="small" style="margin:14px 0 0;text-align:center">This is a classroom access gate. Keep the password private.</p></div></div>';
+  (hosted?'<div class="warn" style="margin-top:12px">The hosting code is printed in the PowerShell window when you start the school server. It changes each time the server restarts.</div>'
+   :'<p class="small" style="margin:14px 0 0;text-align:center">This is a classroom access gate. Keep it private.</p>')+
+  '</div></div>';
  var input=$('#teacherPassword'),show=$('#showTeacherPassword');
- show.onchange=function(){input.type=show.checked?'text':'password';};
+ if(show)show.onchange=function(){input.type=show.checked?'text':'password';};
  $('#teacherLoginBack').onclick=function(){role=null;renderRole();};
+ function fail(msg){loginFails++;input.value='';
+  if(loginFails>=5){loginFails=0;loginLockUntil=Date.now()+30000;renderTeacherLogin();}
+  else{$('#teacherLoginError').textContent=msg+' '+(5-loginFails)+' attempts remaining.';input.focus();}}
+ function pass(){loginFails=0;teacherAuthed=true;
+  try{sessionStorage.setItem(K+'teacherAuth','1');}catch(x){}
+  setRole('teacher',0,'Teacher',true);
+  if(net)net.send({t:'who',brief:brief,rules:rules,teacherHash:teacherHash});}
  $('#teacherLoginForm').onsubmit=function(e){e.preventDefault();
   if(Date.now()<loginLockUntil){renderTeacherLogin();return;}
-  if(passwordHash(input.value)===teacherHash){
-   loginFails=0;teacherAuthed=true;try{sessionStorage.setItem(K+'teacherAuth','1');}catch(x){}
-   setRole('teacher',0,'Teacher');
+  var val=input.value;
+  if(hosted){
+   /* The server checks the code. Only it can grant control. */
+   $('#teacherLoginError').textContent='Checking with the server...';
+   var answered=false;
+   hostPending=function(m){if(answered)return;answered=true;hostPending=null;
+    if(m.ok){classJoinCode=m.classCode||classJoinCode;pass();}else fail('That hosting code is not right.');};
+   var authStarted=Date.now();
+   (function sendHostCode(){
+    if(answered)return;
+    if(net&&net.ws&&net.ws.readyState===1){net.send({t:'hostauth',code:normCode(val)||val});return;}
+    if(Date.now()-authStarted<3500)setTimeout(sendHostCode,150);
+   })();
+   setTimeout(function(){if(!answered){answered=true;hostPending=null;
+    fail('No answer from the server. Check it is still running.');}},4000);
   }else{
-   loginFails++;input.value='';
-   if(loginFails>=5){loginFails=0;loginLockUntil=Date.now()+30000;renderTeacherLogin();}
-   else{$('#teacherLoginError').textContent='Incorrect password. '+(5-loginFails)+' attempts remaining.';input.focus();}
-  }};
+   if(passwordHash(val)===teacherHash)pass();else fail('Incorrect password.');}
+ };
  if(!wait)setTimeout(function(){input.focus();},30);
  else setTimeout(function(){if(mode==='teacher-login')renderTeacherLogin();},Math.min(wait,1)*1000+100);
 }
@@ -294,7 +366,7 @@ ui.innerHTML='<div class="overlay"><div class="panel"><h2 style="text-align:cent
 '<p class="label" style="margin-top:14px">TAP YOUR SEAT NUMBER</p><div class="grid30">'+s+'</div>'+
 '<button class="btn" data-back="1" style="margin-top:12px">BACK</button></div></div></div>';
 $('#roles').onclick=function(e){var b=e.target.closest('[data-r]');if(!b)return;
- if(b.dataset.r==='teacher'){role='teacher';renderTeacherLogin();}
+ if(b.dataset.r==='teacher'){role='teacher';if(!net)connect();renderTeacherLogin();}
  else{$('#roles').classList.add('hidden');$('#seatPick').classList.remove('hidden');$('#nameIn').focus();}};
 $('#seatPick').onclick=function(e){
  if(e.target.closest('[data-back]')){$('#roles').classList.remove('hidden');$('#seatPick').classList.add('hidden');return;}
@@ -369,7 +441,7 @@ function beginRun(){mode='play';ui.innerHTML='';ui.onclick=null;layer.innerHTML=
  if(syn.on)synAlign(true);else if(useSynth&&audioUnlocked)synStart();
  push();}
 function resetRun(attract){dead=false;won=false;paused=false;cam=0;parts=[];flash=attract?0:.3;
- player={x:0,y:(level&&level.floor)||0,vy:0,a:0,ground:true,ship:false,hold:false};if(level)level.attract=attract;}
+ player={x:0,y:(level&&level.floor)||0,vy:0,a:0,ground:true,wasG:true,sq:0,py0:0,ship:false,hold:false};if(level)level.attract=attract;}
 function refreshHud(){var hl=$('#hudLives'),ht=$('#hudTimer');
  if(hl)hl.innerHTML=isTeacher()?'<span style="color:var(--gold)">UNLIMITED</span>':livesHtml();
  if(ht){ht.textContent=isTeacher()?'':('TIME '+fmt(playLeft));ht.className='timer'+(playLeft<60?' low':'');}}
@@ -546,34 +618,43 @@ function probe(lv,px,py,vy,ship,prevY){
  var obs=lv.obs,fl=lv.floor||0;
  if(prevY===undefined)prevY=py;
  var pl=px-CELL*.32,pw=CELL*.64,pr2=pl+pw,pb=py+CELL*.1,ph=CELL*.78,pt=pb+ph;
- var land=null,ceil=null;
+ var land=null,ceil=null,pad=null;
+ /* PASS 1 - solid things only. We must know whether the player lands on a
+    block BEFORE testing spikes, otherwise a spike hidden under that block
+    kills a player who actually landed safely on top of it. */
  for(var i=0;i<obs.length;i++){var o=obs[i];
   if(o.x-px>CELL*4)break;
   if(px-o.x>CELL*4||o.t==='ship'||o.t==='cube')continue;
-  /* ground spikes: test each spike in the group as its own triangle */
-  if(o.t==='s1'||o.t==='s2'||o.t==='s3'){var n=+o.t[1];
-   for(var q=0;q<n;q++)if(spikeHit(pl,pr2,pb,pt,o.x+q*CELL,fl))return{die:true};
-   continue;}
-  if(o.t==='S'){if(spikeHit(pl,pr2,pb,pt,o.x,o.r*CELL))return{die:true};continue;}
   if(o.t==='P'){
-   if(box(pl,pb,pw,ph,o.x+3,o.r*CELL,CELL-6,CELL*.5))
-    return{die:false,land:null,ceil:null,pad:o.v};
+   if(box(pl,pb,pw,ph,o.x+3,o.r*CELL,CELL-6,CELL*.5))pad=o.v;
    continue;}
   if(o.t==='pit'){if(!ship&&px>o.x+4&&px<o.x+CELL*3-4&&py<=fl)return{die:true};continue;}
   var bx,by,bh;
   if(o.t==='b1'||o.t==='b2'){bx=o.x;by=fl;bh=(o.t==='b2'?2:1)*CELL;}
   else if(o.t==='B'){bx=o.x;by=o.r*CELL;bh=CELL;}
   else continue;
-  if(!box(pl,pb,pw,ph,bx,by,CELL,bh))continue;
   var top=by+bh,tol=CELL*.45;
   /* Landing counts if we are near the top OR if we crossed straight
      through it this frame (fast falls off a high jump pad). */
-  var onTop=vy<=0&&(py>=top-tol||prevY>=top-1);
-  var underIt=vy>=0&&(py+CELL<=by+tol||prevY+CELL<=by+1);
+  var horizontal=pl<bx+CELL&&pr2>bx;
+  var onTop=horizontal&&vy<=0&&py<=top&&prevY>=top-tol;
+  var underIt=horizontal&&vy>=0&&py+CELL>=by&&prevY+CELL<=by+tol;
   if(onTop){if(land===null||top>land)land=top;continue;}
   if(underIt){if(ceil===null||by<ceil)ceil=by;continue;}
+  if(!box(pl,pb,pw,ph,bx,by,CELL,bh))continue;
   /* Anything else is a genuine side-on hit. */
   return{die:true};}
+ /* PASS 2 - spikes, tested from where the player actually ends up.
+    Standing on a block lifts the body clear of anything beneath it. */
+ var ey=land!==null?land:(ceil!==null?ceil-CELL:py);
+ var eb=ey+CELL*.1,et=eb+ph;
+ for(var j2=0;j2<obs.length;j2++){var s2=obs[j2];
+  if(s2.x-px>CELL*4)break;
+  if(px-s2.x>CELL*4)continue;
+  if(s2.t==='s1'||s2.t==='s2'||s2.t==='s3'){var n2=+s2.t[1];
+   for(var q2=0;q2<n2;q2++)if(spikeHit(pl,pr2,eb,et,s2.x+q2*CELL,fl))return{die:true};}
+  else if(s2.t==='S'){if(spikeHit(pl,pr2,eb,et,s2.x,s2.r*CELL))return{die:true};}}
+ if(pad!==null)return{die:false,land:null,ceil:null,pad:pad};
  return{die:false,land:land,ceil:ceil};}
 
 /* ---------------- solvability checker ---------------- */
@@ -599,12 +680,14 @@ function solvable(lv){
     else{vy-=3400*dt;y+=vy*dt;
      var cap=rf||(fl+SKY);
      if(y+CELL>cap){y=cap-CELL;if(vy>0)vy=0;}
-     if(y<=fl){y=fl;vy=0;g=1;if(hold){vy=900;g=0;}}else g=0;}
+     if(y<=fl){y=fl;vy=0;g=1;}else g=0;}
     var r=probe(lv,nxx,y,vy,sh,s.y);
     if(r.die)continue;
     if(r.pad&&!sh){vy=r.pad;g=0;}
     else if(r.land!==null){y=r.land;if(vy<0)vy=0;if(!sh)g=1;}
     else if(r.ceil!==null){y=r.ceil-CELL;if(vy>0)vy=0;}
+    /* hold-to-jump resolves after landing, matching the live game */
+    if(!sh&&g&&hold){vy=900;g=0;}
     var qy=Math.round(y/4),qv=Math.round(vy/70),k=qy+'|'+qv+'|'+g+'|'+sh;
     if(!nx[k]){nx[k]={y:y,vy:vy,g:g,sh:sh};count++;empty=false;}}}
   if(empty)return{ok:false,x:x};
@@ -691,13 +774,21 @@ function update(dt){
    if(Math.random()<.5*gfx.parts)parts.push({x:p.x-10,y:fl+3,vx:-200-Math.random()*160,vy:40+Math.random()*70,life:.22,size:3+Math.random()*4,c:C.cyan});}
   else if(p.y+CELL>ceilY){p.y=ceilY-CELL;p.vy=0;
    if(Math.random()<.5*gfx.parts)parts.push({x:p.x-10,y:ceilY-3,vx:-200-Math.random()*160,vy:-40-Math.random()*70,life:.22,size:3+Math.random()*4,c:C.pink});}}
- else{p.vy-=3400*dt;p.y+=p.vy*dt;
-  var capY=rf||(fl+SKY);
-  if(p.y+CELL>capY){p.y=capY-CELL;if(p.vy>0)p.vy=0;}
-  if(p.y<=fl){if(!p.ground&&p.vy<0){burst(p.x,fl,C.cyan,5);p.sq=1;}p.y=fl;p.vy=0;p.ground=true;p.a=Math.round(p.a/(Math.PI/2))*(Math.PI/2);
-   if(p.hold&&mode==='play'){p.vy=900;p.ground=false;}}
-  else{p.ground=false;p.a+=7.6*dt;}}
+  else{p.vy-=3400*dt;p.y+=p.vy*dt;
+   var capY=rf||(fl+SKY);
+   if(p.y+CELL>capY){p.y=capY-CELL;if(p.vy>0)p.vy=0;}
+   p.wasG=p.ground;
+   if(p.y<=fl){p.y=fl;p.vy=0;p.ground=true;}
+   else p.ground=false;}
  hit();
+ /* Rotation is decided AFTER collisions, so standing on a block counts as
+    grounded. Grounded = snap flat and slide. Airborne = spin. */
+ if(!p.ship&&!dead){
+  if(p.ground){
+   if(!p.wasG){burst(p.x,p.y,C.cyan,5);p.sq=1;}
+   p.a=Math.round(p.a/(Math.PI/2))*(Math.PI/2);
+   if(p.hold&&mode==='play'){p.vy=900;p.ground=false;}}
+  else p.a+=7.6*dt;}
  for(var i=parts.length-1;i>=0;i--){var q=parts[i];q.life-=dt;if(q.life<=0)parts.splice(i,1);else{q.x+=q.vx*dt;q.y+=q.vy*dt;q.vy-=700*dt;}}
  flash=Math.max(0,flash-dt*2.8);if(p.sq)p.sq=Math.max(0,p.sq-dt*6);
  var f=Math.min(1,p.x/level.end),b=$('#bar'),pc=$('#pct');if(b)b.style.width=f*100+'%';if(pc)pc.textContent=Math.floor(f*100)+'%';
@@ -895,7 +986,8 @@ ui.innerHTML='<div class="lab"><div class="topbar"><button class="btn" data-act=
 '<button class="btn" data-act="bg">BACKGROUND</button>'+
 '<button class="btn" data-act="music">MUSIC</button>'+
 '<button class="btn lime" data-lab="save">SAVE</button><button class="btn" data-lab="open">MY LEVELS</button>'+
-'<button class="btn" data-lab="share">SHARE CODE</button><button class="btn" data-lab="import">IMPORT</button>'+
+'<button class="btn gold" data-lab="share">GET WORD CODE</button>'+
+'<button class="btn" data-lab="sharetext">TEXT CODE</button><button class="btn" data-lab="import">IMPORT</button>'+
 (isTeacher()?'<button class="btn gold" data-lab="pushall">PUSH TO CLASS</button>':'')+
 '<button class="btn pink" data-lab="clear">CLEAR</button></div>'+quest+
 '<div class="row" style="padding:6px 13px;gap:6px">'+
@@ -942,7 +1034,11 @@ ui.onclick=function(e){
  else if(k==='clear'){if(confirm('Clear the whole level?')){lab=[];persist();noteEdit();drawLab();}}
  else if(k==='save'){saveLevelAs();}
  else if(k==='open'){renderLevels('lab');}
- else if(k==='share')prompt('Copy this code and give it to a friend:',encode(lab));
+ else if(k==='share'){
+  var wc=publishLevel();
+  if(!wc)return;
+  alert('YOUR LEVEL CODE\n\n      '+wc+'\n\nTell a friend these four words. They type them into\nMY LEVELS > PLAY A FRIEND\u2019S LEVEL.\n\n(Works while you are both connected to the class.)');}
+ else if(k==='sharetext')prompt('Backup text code (works offline):',encode(lab));
  else if(k==='import'){var c=prompt('Paste a level code:','');var p=decode(c||'');
   if(p){lab=p.slice();if(p.cfg){labCfg=p.cfg;saveCfg();}persist();noteEdit();openLab();}else if(c)alert('That code did not work.');}
  else if(k==='pushall'){cmd('all',{c:'push',code:encode(lab)});alert('Sent your level to the whole class.');}};
@@ -1063,6 +1159,39 @@ function drawLab(){if(!ed)return;var z=ed.getContext('2d');z.setTransform(edpr,0
  z.fillStyle=C.gold;z.textAlign='left';z.fillText('GOAL',gx+5,24);z.fillStyle=C.lime;z.fillText('START',X(1),24);
  updateIssues();}
 
+/* ---------------- word share codes (Minecraft Education style) ----------
+   Four game words instead of a long jumble. The level travels over the
+   class connection, so anyone in the room can type the words and play. */
+var WORDS=['SPIKE','BLOCK','TOWER','TRIO','DUO','PAD','SHIP','CUBE','GAP','DASH',
+ 'NEON','JUMP','WAVE','BEAT','GRID','LASER','ORBIT','PULSE','ROCKET','STAR',
+ 'STORM','TURBO','VOLT','ZONE','COMET','NOVA','PRISM','QUARTZ','RIFT','SOLAR',
+ 'TITAN','VAPOR','ZAP','ATOM','BOLT','CIRCUIT','DRIFT','ECHO','FLARE','GLIDE',
+ 'HELIX','IMPULSE','JETPACK','KRYPTON','LUNAR','MAGNET','NEBULA','ONYX','PIXEL','QUEST',
+ 'RADAR','SPARK','THRUST','ULTRA','VECTOR','WARP','XENON','YONDER','ZENITH','ANCHOR',
+ 'BRIDGE','CANYON','DELTA','EMBER'];
+var pubs={},pendingGet=null;
+function wordCode(){var a=[];for(var i=0;i<4;i++)a.push(WORDS[Math.floor(Math.random()*WORDS.length)]);return a.join(' ');}
+function normCode(s){return String(s||'').toUpperCase().replace(/[^A-Z ]+/g,' ').split(/\s+/).filter(Boolean).join(' ');}
+function isWordCode(s){var p=normCode(s).split(' ');
+ return p.length===4&&p.every(function(w){return WORDS.indexOf(w)>=0;});}
+function publishLevel(){
+ if(!lab.length){alert('Build a level first.');return;}
+ var code=wordCode(),data=encode(lab);
+ pubs[code]=data;save('pubs',pubs);
+ if(net)net.send({t:'pub',code:code,data:data});
+ return code;}
+function fetchByWords(code,cb){
+ code=normCode(code);
+ if(pubs[code])return cb(pubs[code]);
+ var cached=load('pubs',{})||{};
+ if(cached[code])return cb(cached[code]);
+ if(!net){cb(null);return;}
+ pendingGet={code:code,cb:cb,done:false};
+ net.send({t:'get',code:code});
+ setTimeout(function(){if(pendingGet&&pendingGet.code===code&&!pendingGet.done){
+  var f=pendingGet.cb;pendingGet=null;f(null);}},3000);}
+pubs=load('pubs',{})||{};
+
 /* ---------------- my levels library ---------------- */
 function getSaved(){var s=load('saved',{})||{};
  /* upgrade old saves (plain arrays) to the new object format */
@@ -1115,10 +1244,11 @@ function renderLevels(from){
  (rows?'<div style="max-height:40vh;overflow:auto;margin:10px 0">'+rows+'</div>'
   :'<p class="small" style="text-align:center;padding:16px">No saved levels yet. Build one in the LEVEL LAB and press SAVE.</p>')+
  '<div class="card" style="border-color:#2ef2ff55"><h3>PLAY A FRIEND\u2019S LEVEL</h3>'+
- '<p class="small">Paste a level code someone shared with you.</p>'+
- '<div class="row"><input id="codeIn" class="input grow" placeholder="Paste level code here"/>'+
+ '<p class="small">Type the four words your friend tells you, for example <b>SPIKE TOWER NEON PULSE</b>. A long text code also works.</p>'+
+ '<div class="row"><input id="codeIn" class="input grow" placeholder="SPIKE TOWER NEON PULSE"/>'+
  '<button class="btn primary" data-lv2="codeplay">PLAY IT</button>'+
- '<button class="btn lime" data-lv2="codesave">SAVE IT</button></div></div>'+
+ '<button class="btn lime" data-lv2="codesave">SAVE IT</button></div>'+
+ '<p class="small" id="codeMsg" style="min-height:16px"></p></div>'+
  '<div class="controls"><button class="btn lime" data-lv2="newlab">OPEN LEVEL LAB</button></div>'+
  '</div></div>';
  ui.onclick=function(e){var b=e.target.closest('[data-lv2]');if(!b)return;var k=b.dataset.lv2,nm=b.dataset.n;
@@ -1133,14 +1263,18 @@ function renderLevels(from){
   else if(k==='del'){if(confirm('Delete "'+nm+'"?')){var a3=getSaved();delete a3[nm];save('saved',a3);renderLevels();}}
   else if(k==='newlab'){mode='lab';openLab();}
   else if(k==='codeplay'||k==='codesave'){
-   var c2=$('#codeIn').value.trim();if(!c2){alert('Paste a code first.');return;}
-   var p=decode(c2);
-   if(!p){alert('That code did not work. Check it was copied fully.');return;}
-   lab=p.slice();if(p.cfg){labCfg=p.cfg;saveCfg();}persist();
-   if(k==='codeplay'){level=makeCustom();beginRun();}
-   else{var nm2=prompt('Name this level:','FRIEND LEVEL');
-    if(nm2){var a4=getSaved();a4[nm2.trim().slice(0,22)]={lab:lab.slice(),cfg:labCfg,date:Date.now()};
-     save('saved',a4);renderLevels();}}}};
+   var c2=$('#codeIn').value.trim(),msg=$('#codeMsg');
+   if(!c2){if(msg)msg.textContent='Type the four words first.';return;}
+   var finish=function(raw){
+    var p=raw?decode(raw):null;
+    if(!p){if(msg)msg.innerHTML='<span style="color:var(--pink)">Could not find that level. Check the words and that your friend is connected.</span>';return;}
+    lab=p.slice();if(p.cfg){labCfg=p.cfg;saveCfg();}persist();
+    if(k==='codeplay'){level=makeCustom();level.title='FRIEND LEVEL';beginRun();}
+    else{var nm2=prompt('Name this level:','FRIEND LEVEL');
+     if(nm2){var a4=getSaved();a4[nm2.trim().slice(0,22)]={lab:lab.slice(),cfg:labCfg,date:Date.now()};
+      save('saved',a4);renderLevels();}}};
+   if(isWordCode(c2)){if(msg)msg.textContent='Looking for that level...';fetchByWords(c2,finish);}
+   else finish(c2);}};
  refreshBadges();}
 
 /* ---------------- character customiser ---------------- */
@@ -1337,7 +1471,10 @@ function renderConsole(){if(!isTeacher())return;consoleOpen=true;mode='console';
     '<canvas class="mini" data-code="'+(ok?esc(s.code):'')+'"></canvas>'+
     '<span class="small">'+(ok?(s.designLock?'<b style="color:var(--gold)">DESIGNING '+s.edits+'/'+s.need+'</b>':esc(s.screen)+' '+fmt(s.playLeft)):'offline')+'</span><br/>'+
     '<span class="small">'+(ok?lv+' '+s.pieces+' pcs '+s.best+'%':'')+'</span></button>';}
-  body='<div class="stats"><div class="stat"><strong>'+live.length+'</strong>online</div><div class="stat"><strong>'+playing+'</strong>playing</div>'+
+  body=(classJoinCode?'<div class="nowbar" style="border-color:#2ef2ff77;text-align:center"><span class="label">STUDENT JOIN CODE</span><br/>'+
+   '<b style="font-size:20px;color:var(--cyan);letter-spacing:3px">'+esc(classJoinCode)+'</b> '+
+   '<button class="btn" style="margin-left:10px" data-con="copyjoin">COPY</button></div>':'')+
+   '<div class="stats"><div class="stat"><strong>'+live.length+'</strong>online</div><div class="stat"><strong>'+playing+'</strong>playing</div>'+
    '<div class="stat"><strong>'+inLab+'</strong>in lab</div><div class="stat"><strong>'+gated+'</strong>designing</div><div class="stat"><strong>'+lockd+'</strong>locked</div></div>'+
    '<div class="controls"><button class="btn gold" data-con="lockall">LOCK ALL</button><button class="btn lime" data-con="unlockall">UNLOCK ALL</button>'+
    '<button class="btn" data-con="alllab">ALL TO LAB</button><button class="btn" data-con="allmenu">ALL TO MENU</button>'+
@@ -1430,13 +1567,19 @@ function renderConsole(){if(!isTeacher())return;consoleOpen=true;mode='console';
   '<div class="controls"><button class="btn primary" data-con="schoolbook">OPEN EASY STEP-BY-STEP GUIDE</button>'+
   '<button class="btn lime" data-con="schoolserver">DOWNLOAD SCHOOL SERVER</button>'+
   '<button class="btn" data-con="itrequest">COPY IT REQUEST</button></div></div>'+
-  '<div class="card" style="border-color:#ffb53166"><h3>TEACHER PASSWORD</h3>'+
+  (classJoinCode?'<div class="card" style="border-color:#2ef2ff77"><h3>STUDENT JOIN CODE</h3>'+
+  '<p style="font-size:24px;font-weight:1000;letter-spacing:4px;color:var(--cyan);text-align:center">'+esc(classJoinCode)+'</p>'+
+  '<p class="small">Put this code on the board. Pupils type it after their name and seat. Do not give them the private Teacher Hosting Code.</p>'+
+  '<div class="controls"><button class="btn primary" data-con="copyjoin">COPY STUDENT CODE</button></div></div>':'')+
+  (serverMode()?'<div class="card" style="border-color:#ffb53166"><h3>TEACHER HOSTING CODE IS ACTIVE</h3>'+
+  '<p class="small">This teacher session was unlocked by the private four-word code printed in the school-server window. The code changes whenever the server restarts. Keep it private.</p></div>':
+  '<div class="card" style="border-color:#ffb53166"><h3>LOCAL TEACHER PASSWORD</h3>'+
   '<p class="small">'+(teacherPassCustom?'A custom teacher password is active.':'You are using the initial password. Change it before sharing the class link.')+' Passwords must be at least 8 characters.</p>'+
   '<div class="row"><input id="oldPass" class="input grow" type="password" autocomplete="current-password" placeholder="Current password"/>'+
   '<input id="newPass" class="input grow" type="password" autocomplete="new-password" placeholder="New password"/>'+
   '<input id="confirmPass" class="input grow" type="password" autocomplete="new-password" placeholder="Confirm new password"/>'+
   '<button class="btn gold" data-con="changepass">CHANGE PASSWORD</button></div>'+
-  '<p class="small">After changing it, use COPY PUPIL LINK below and share that updated link. The password itself is not included as readable text.</p></div>'+
+  '<p class="small">After changing it, use COPY PUPIL LINK below and share that updated link. The password itself is not included as readable text.</p></div>')+
   '<div class="card" style="border-color:#2ef2ff66"><h3>ENTRY MESSAGE FOR ALL PUPILS</h3>'+
   '<p class="small">This is the first screen every pupil sees after entering their name and seat. The game bot runs behind it and the panel automatically fits your writing.</p>'+
   '<textarea id="briefBox" class="input" style="min-height:190px" placeholder="Type the entry message here..."></textarea>'+
@@ -1445,9 +1588,9 @@ function renderConsole(){if(!isTeacher())return;consoleOpen=true;mode='console';
   '<button class="btn gold" data-con="sendshow">SAVE AND SHOW TO ALL NOW</button>'+
   '<button class="btn" data-con="previewbrief">PREVIEW</button>'+
   '<button class="btn pink" data-con="resetbrief">RESET DEFAULT</button></div></div>'+
-  '<div class="card"><h3>1. CONNECT REAL DEVICES</h3><p class="small">Tabs on this computer connect automatically. For separate devices, run the relay on your laptop: install Node.js, then npm install ws, then node classroom-relay.mjs.</p>'+
-  '<button class="btn lime" data-con="relayfile">DOWNLOAD RELAY SCRIPT</button></div>'+
-  '<div class="card"><h3>2. RELAY ADDRESS</h3><div class="row"><input id="relayIn" class="input grow" placeholder="ws://192.168.1.24:8080"/><button class="btn lime" data-con="relaysave">CONNECT</button></div></div>'+
+  '<div class="card"><h3>1. CONNECT REAL DEVICES SECURELY</h3><p class="small">Download the school server, put it beside the HTML file, install Node.js, run npm install ws, then run node classroom-server.mjs. It prints separate teacher and student codes.</p>'+
+  '<button class="btn lime" data-con="relayfile">DOWNLOAD SECURE SCHOOL SERVER</button></div>'+
+  '<div class="card"><h3>2. OPTIONAL EXTERNAL SERVER ADDRESS</h3><p class="small">Leave this blank when everyone opens the link printed by classroom-server.mjs. Only enter an address when IT gave you a separate approved WebSocket server.</p><div class="row"><input id="relayIn" class="input grow" placeholder="wss://approved-school-server.example"/><button class="btn lime" data-con="relaysave">CONNECT</button></div></div>'+
   '<div class="card"><h3>3. PUBLIC PUPIL LINK WITH YOUR ENTRY MESSAGE</h3><p class="small">This special link includes the current entry message and play rules. Pupils get the correct message immediately, even before the live classroom connection starts.</p>'+
   '<input id="classLink" class="input" readonly/><div class="controls"><button class="btn primary" data-con="copyclasslink">COPY PUPIL LINK</button></div>'+
   '<p class="small">Teacher shortcut: '+esc(base)+'?teacher</p></div>';}
@@ -1520,6 +1663,15 @@ var SCHOOL_BOOK=[
  '6. Type: npm install ws',
  '7. Type: node classroom-server.mjs',
  '8. Keep the black/blue terminal window open for the whole lesson.',
+ '',
+ 'TEACHER HOSTING CODE',
+ 'When the server starts it prints a TEACHER HOSTING CODE of four words.',
+ 'Type that code on the teacher device to unlock class controls.',
+ 'The server checks it, so pupils cannot unlock control on their own.',
+ 'The code changes every time you restart the server. Keep it off the projector.',
+ 'The server also prints a separate STUDENT JOIN CODE.',
+ 'Put the student code on the board. Pupils enter it after their name and seat.',
+ 'Never give pupils the private Teacher Hosting Code.',
  '',
  'OPEN THE APP',
  'Teacher computer: http://localhost:8080',
@@ -1595,8 +1747,8 @@ function renderSchoolBook(){
   stepCard(4,'Open PowerShell in the folder','Open the NEON-DASH folder in File Explorer. Click the address bar at the top. Type powershell and press Enter.','')+
   stepCard(5,'Install the one server package','Paste this into PowerShell and press Enter. Wait until it finishes.','npm install ws')+
   stepCard(6,'Start NEON DASH','Paste this into the same PowerShell window and press Enter.','node classroom-server.mjs')+
-  stepCard(7,'Keep PowerShell open','The window prints two or more web addresses. Do not close this window during the lesson.','')+
-  stepCard(8,'Open the correct links','On the teacher computer use http://localhost:8080. On pupil computers use the printed address beginning http://192.168 — never localhost.','')+
+  stepCard(7,'Write down both codes','The window prints a private TEACHER HOSTING CODE and a separate STUDENT JOIN CODE. Keep the teacher code private. Put only the student code on the board. Leave the window open.','')+
+  stepCard(8,'Open the correct links','Teacher: use http://localhost:8080 and enter the private hosting code. Pupils: use the printed http://192.168 address, enter a name and seat, then enter the student join code.','')+
   '</div></div>'+
 
   '<div id="routeB" class="card" style="border-color:#ffb53166"><h3>ROUTE B - ASK SCHOOL IT</h3>'+
@@ -1704,6 +1856,7 @@ function onConsoleClick(e){
  var b=e.target.closest('[data-con]');if(!b)return;var k=b.dataset.con,s=students.get(selSeat);
  if(k==='close'){consoleOpen=false;renderMenu();}
  else if(k==='logout')logout();
+ else if(k==='copyjoin'){copyText(classJoinCode,'Student join code');}
  else if(k==='schoolbook')renderSchoolBook();
  else if(k==='schoolserver')downloadSchoolServer();
  else if(k==='itrequest')copyText(IT_REQUEST,'IT request');
@@ -1759,8 +1912,10 @@ function onConsoleClick(e){
  else if(k==='preset1'){rules={lives:8,edits:3,minutes:8,needTest:false};save('rules',rules);cmd('all',{c:'rules',rules:rules});cmd('all',{c:'refill'});renderConsole();}
  else if(k==='preset2'){rules={lives:5,edits:5,minutes:5,needTest:true};save('rules',rules);cmd('all',{c:'rules',rules:rules});cmd('all',{c:'refill'});renderConsole();}
  else if(k==='preset3'){rules={lives:3,edits:8,minutes:3,needTest:true};save('rules',rules);cmd('all',{c:'rules',rules:rules});cmd('all',{c:'refill'});renderConsole();}
- else if(k==='relayfile')dl('classroom-relay.mjs',RELAY,'text/javascript');
- else if(k==='relaysave'){relay=$('#relayIn').value.trim();localStorage.setItem(K+'relay',relay);connect();alert('Connection updated.');renderConsole();}}
+ else if(k==='relayfile')downloadSchoolServer();
+ else if(k==='relaysave'){relay=$('#relayIn').value.trim();localStorage.setItem(K+'relay',relay);
+  teacherAuthed=false;try{sessionStorage.removeItem(K+'teacherAuth');}catch(x){}
+  connect();alert('Server address updated. Enter the hosting code from that server to unlock controls.');renderTeacherLogin();}}
 function mini(c,p){if(!c)return;var w=c.clientWidth||140,h=24,d=devicePixelRatio||1;c.width=w*d;c.height=h*d;
  var z=c.getContext('2d');z.setTransform(d,0,0,d,0,0);z.strokeStyle='#ffffff44';z.beginPath();z.moveTo(0,h-5);z.lineTo(w,h-5);z.stroke();
  (p||[]).forEach(function(q){var x=q.col/LABCOLS*w,hh=q.t==='b2'?13:8;
@@ -2012,7 +2167,11 @@ function refreshBadges(){if(mode==='role')return;var h='';
 /* ---------------- boot ---------------- */
 applyBg();sizeYT();loadMusic();
 if(!role)renderRole();
-else if(role==='teacher'&&!teacherAuthed)renderTeacherLogin();
+else if(role==='teacher'&&!teacherAuthed){
+ /* connect first: the hosting code is verified by the server */
+ connect();renderTeacherLogin();}
+else if(role==='student'&&serverMode()&&!studentAuthed){
+ connect();renderStudentLogin();}
 else{connect();renderEntryMessage();}
 })();
 </script>
